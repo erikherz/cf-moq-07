@@ -82,23 +82,20 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let tls = cli.tls.load()?;
 
-    if tls.server.is_none() {
-        anyhow::bail!("missing TLS certificates");
-    }
-
     // WebSocket-only mode for environments without UDP support (like Cloudflare Containers)
     if cli.ws_only {
         let ws_bind = cli.ws_bind.ok_or_else(|| {
             anyhow::anyhow!("--ws-bind is required when using --ws-only mode")
         })?;
 
+        // In ws-only mode with no TLS, we don't need certificates
+        if !cli.ws_no_tls && tls.server.is_none() {
+            anyhow::bail!("TLS certificates required unless --ws-no-tls is specified");
+        }
+
         log::info!("Running in WebSocket-only mode (no QUIC)");
 
         let locals = Locals::new();
-
-        // Set up upstream connection for forwarding announces (via HTTPS, not QUIC)
-        // Note: In ws-only mode, we can't forward to QUIC relays directly
-        // The container will just be a local relay without upstream forwarding
 
         let ws_server = WebSocketServer::new(WebSocketConfig {
             bind: ws_bind,
@@ -112,6 +109,11 @@ async fn main() -> anyhow::Result<()> {
         });
 
         return ws_server.run().await;
+    }
+
+    // Normal mode requires TLS certificates for QUIC
+    if tls.server.is_none() {
+        anyhow::bail!("missing TLS certificates");
     }
 
     // Normal mode with QUIC server
