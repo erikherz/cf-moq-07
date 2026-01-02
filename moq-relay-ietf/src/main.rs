@@ -24,6 +24,43 @@ pub use websocket::*;
 use std::net;
 use url::Url;
 
+/// Helper function to connect to an upstream relay via QUIC
+async fn connect_upstream(
+    upstream_url: &Url,
+    tls: &moq_native_ietf::tls::Config,
+    locals: Locals,
+) -> anyhow::Result<()> {
+    // Create a QUIC client-only endpoint (binds to ephemeral port)
+    let quic = moq_native_ietf::quic::Endpoint::new(moq_native_ietf::quic::Config {
+        bind: "[::]:0".parse().unwrap(),
+        tls: tls.clone(),
+    })?;
+
+    // Connect to the upstream relay
+    let upstream_session = quic
+        .client
+        .connect(upstream_url)
+        .await
+        .context("failed to connect to upstream relay")?;
+
+    let (session, publisher, subscriber) =
+        moq_transport::session::Session::connect(upstream_session)
+            .await
+            .context("failed to establish upstream MoQ session")?;
+
+    log::info!("Connected to upstream relay: {}", upstream_url);
+
+    // Create session for the upstream connection
+    let upstream = Session {
+        session,
+        producer: Some(Producer::new(publisher, locals.clone(), None)),
+        consumer: Some(Consumer::new(subscriber, locals.clone(), None, None)),
+    };
+
+    // Run the upstream session (blocks until it ends)
+    upstream.run().await
+}
+
 #[derive(Parser, Clone)]
 pub struct Cli {
     /// Listen on this address for QUIC/WebTransport connections
@@ -103,62 +140,43 @@ async fn main() -> anyhow::Result<()> {
 
         let locals = Locals::new();
 
-        // If upstream is provided, create a QUIC client to connect to it
-        let (forward, remotes) = if let Some(upstream_url) = &cli.upstream {
-            log::info!("Connecting to upstream relay: {}", upstream_url);
-
-            // Create a QUIC client-only endpoint (binds to ephemeral port)
-            let quic = moq_native_ietf::quic::Endpoint::new(moq_native_ietf::quic::Config {
-                bind: "[::]:0".parse().unwrap(),
-                tls: tls.clone(),
-            })?;
-
-            // Connect to the upstream relay
-            let upstream_session = quic
-                .client
-                .connect(upstream_url)
-                .await
-                .context("failed to connect to upstream relay")?;
-
-            let (session, publisher, subscriber) =
-                moq_transport::session::Session::connect(upstream_session)
-                    .await
-                    .context("failed to establish upstream MoQ session")?;
-
-            log::info!("Connected to upstream relay: {}", upstream_url);
-
-            // Create session for the upstream connection
-            let upstream = Session {
-                session,
-                producer: Some(Producer::new(publisher, locals.clone(), None)),
-                consumer: Some(Consumer::new(subscriber, locals.clone(), None, None)),
-            };
-
-            let forward = upstream.producer.clone();
-
-            // Spawn the upstream session handler
-            tokio::spawn(async move {
-                if let Err(err) = upstream.run().await {
-                    log::error!("Upstream session failed: {}", err);
-                }
-            });
-
-            (forward, None) // No remotes API, just forwarding
-        } else {
-            log::warn!("No --upstream specified, running in isolated mode (no stream forwarding)");
-            (None, None)
-        };
-
+        // Start the WebSocket server first (so container is ready immediately)
+        // Connect to upstream in the background
         let ws_server = WebSocketServer::new(WebSocketConfig {
             bind: ws_bind,
             tls: tls.clone(),
             no_tls: cli.ws_no_tls,
-            locals,
-            remotes,
+            locals: locals.clone(),
+            remotes: None,
             api: None,
-            forward,
+            forward: None, // We'll handle forwarding differently
             quic_addr: ws_bind, // Dummy address
         });
+
+        // If upstream is provided, spawn a background task to connect to it
+        if let Some(upstream_url) = cli.upstream.clone() {
+            let upstream_tls = tls.clone();
+            let upstream_locals = locals.clone();
+
+            tokio::spawn(async move {
+                log::info!("Connecting to upstream relay in background: {}", upstream_url);
+
+                // Retry loop for upstream connection
+                loop {
+                    match connect_upstream(&upstream_url, &upstream_tls, upstream_locals.clone()).await {
+                        Ok(_) => {
+                            log::info!("Upstream connection closed, reconnecting...");
+                        }
+                        Err(e) => {
+                            log::error!("Failed to connect to upstream relay: {}. Retrying in 5s...", e);
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
+        } else {
+            log::warn!("No --upstream specified, running in isolated mode (no stream forwarding)");
+        }
 
         return ws_server.run().await;
     }
