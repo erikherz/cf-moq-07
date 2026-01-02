@@ -28,6 +28,9 @@ pub struct RelayConfig {
 
     /// Optional address to bind the WebSocket server for Safari support.
     pub ws_bind: Option<net::SocketAddr>,
+
+    /// Disable TLS for WebSocket server (for Cloudflare Containers).
+    pub ws_no_tls: bool,
 }
 
 pub struct Relay {
@@ -40,6 +43,8 @@ pub struct Relay {
     ws_bind: Option<net::SocketAddr>,
     /// TLS config (needed for WebSocket server)
     tls: moq_native_ietf::tls::Config,
+    /// Disable TLS for WebSocket server
+    ws_no_tls: bool,
 }
 
 impl Relay {
@@ -75,6 +80,7 @@ impl Relay {
             remotes,
             ws_bind: config.ws_bind,
             tls: config.tls,
+            ws_no_tls: config.ws_no_tls,
         })
     }
 
@@ -128,6 +134,7 @@ impl Relay {
             let ws_server = WebSocketServer::new(WebSocketConfig {
                 bind: ws_bind,
                 tls: self.tls.clone(),
+                no_tls: self.ws_no_tls,
                 locals: self.locals.clone(),
                 remotes: remotes.clone(),
                 api: self.api.clone(),

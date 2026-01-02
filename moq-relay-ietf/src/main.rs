@@ -57,6 +57,11 @@ pub struct Cli {
     /// When provided, starts a WSS server for browsers without WebTransport support.
     #[arg(long)]
     pub ws_bind: Option<net::SocketAddr>,
+
+    /// Disable TLS for WebSocket server (for use behind TLS-terminating proxies like Cloudflare).
+    /// WARNING: Only use this when the WebSocket server is behind a trusted proxy that handles TLS.
+    #[arg(long, default_value = "false")]
+    pub ws_no_tls: bool,
 }
 
 #[tokio::main]
@@ -84,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         api: cli.api,
         announce: cli.announce,
         ws_bind: cli.ws_bind,
+        ws_no_tls: cli.ws_no_tls,
     })?;
 
     if cli.dev {

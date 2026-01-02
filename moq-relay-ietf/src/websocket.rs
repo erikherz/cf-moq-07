@@ -17,6 +17,8 @@ pub struct WebSocketConfig {
     pub bind: net::SocketAddr,
     /// TLS configuration for WSS.
     pub tls: moq_native_ietf::tls::Config,
+    /// Disable TLS for WebSocket server (for use behind TLS-terminating proxies).
+    pub no_tls: bool,
     /// Local track registry.
     pub locals: Locals,
     /// Remote origins consumer (for fetching from other relays).
@@ -41,7 +43,7 @@ struct WebSocketState {
 /// WebSocket server for Safari support.
 pub struct WebSocketServer {
     bind: net::SocketAddr,
-    tls: TlsAcceptor,
+    tls: Option<TlsAcceptor>,
     state: WebSocketState,
 }
 
@@ -55,10 +57,14 @@ impl WebSocketServer {
             forward: config.forward,
         };
 
-        let mut tls_config = config.tls.server.expect("missing server TLS configuration");
-        // Use HTTP/1.1 for WebSocket upgrades (HTTP/2 doesn't support WebSocket upgrade)
-        tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let tls = TlsAcceptor::from(Arc::new(tls_config));
+        let tls = if config.no_tls {
+            None
+        } else {
+            let mut tls_config = config.tls.server.expect("missing server TLS configuration");
+            // Use HTTP/1.1 for WebSocket upgrades (HTTP/2 doesn't support WebSocket upgrade)
+            tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            Some(TlsAcceptor::from(Arc::new(tls_config)))
+        };
 
         Self {
             bind: config.bind,
@@ -70,7 +76,12 @@ impl WebSocketServer {
     /// Run the WebSocket server.
     pub async fn run(self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.bind).await?;
-        log::info!("WebSocket server listening on wss://{}/", self.bind);
+
+        if self.tls.is_some() {
+            log::info!("WebSocket server listening on wss://{}/", self.bind);
+        } else {
+            log::info!("WebSocket server listening on ws://{}/ (no TLS - behind proxy)", self.bind);
+        }
 
         loop {
             let (stream, addr) = match listener.accept().await {
@@ -85,24 +96,37 @@ impl WebSocketServer {
             let state = self.state.clone();
 
             tokio::spawn(async move {
-                // Perform TLS handshake
-                let tls_stream = match tls.accept(stream).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::debug!("TLS handshake failed from {}: {:?}", addr, e);
-                        return;
+                // Handle connection with or without TLS
+                let ws_session = if let Some(tls) = tls {
+                    // Perform TLS handshake
+                    let tls_stream = match tls.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::debug!("TLS handshake failed from {}: {:?}", addr, e);
+                            return;
+                        }
+                    };
+
+                    log::debug!("TLS connection established from {}", addr);
+
+                    // Accept WebSocket connection with WebTransport protocol negotiation
+                    match web_transport_ws::Session::accept(tls_stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::warn!("WebSocket/WebTransport handshake failed from {}: {:?}", addr, e);
+                            return;
+                        }
                     }
-                };
+                } else {
+                    // No TLS - accept WebSocket directly over TCP (for Cloudflare Containers)
+                    log::debug!("Accepting plain WebSocket connection from {}", addr);
 
-                log::debug!("TLS connection established from {}", addr);
-
-                // Accept WebSocket connection with WebTransport protocol negotiation
-                // This handles the Sec-WebSocket-Protocol: web-transport header
-                let ws_session = match web_transport_ws::Session::accept(tls_stream).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::warn!("WebSocket/WebTransport handshake failed from {}: {:?}", addr, e);
-                        return;
+                    match web_transport_ws::Session::accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::warn!("WebSocket handshake failed from {}: {:?}", addr, e);
+                            return;
+                        }
                     }
                 };
 
