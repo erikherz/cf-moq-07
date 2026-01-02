@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Parser;
 
 mod api;
@@ -67,6 +68,11 @@ pub struct Cli {
     /// Use this for environments that don't support UDP (like Cloudflare Containers).
     #[arg(long, default_value = "false")]
     pub ws_only: bool,
+
+    /// Upstream relay URL for forwarding announces and fetching streams.
+    /// Use with --ws-only to bridge WebSocket clients to a QUIC relay.
+    #[arg(long)]
+    pub upstream: Option<Url>,
 }
 
 #[tokio::main]
@@ -93,18 +99,64 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("TLS certificates required unless --ws-no-tls is specified");
         }
 
-        log::info!("Running in WebSocket-only mode (no QUIC)");
+        log::info!("Running in WebSocket-only mode (no QUIC server)");
 
         let locals = Locals::new();
+
+        // If upstream is provided, create a QUIC client to connect to it
+        let (forward, remotes) = if let Some(upstream_url) = &cli.upstream {
+            log::info!("Connecting to upstream relay: {}", upstream_url);
+
+            // Create a QUIC client-only endpoint (binds to ephemeral port)
+            let quic = moq_native_ietf::quic::Endpoint::new(moq_native_ietf::quic::Config {
+                bind: "[::]:0".parse().unwrap(),
+                tls: tls.clone(),
+            })?;
+
+            // Connect to the upstream relay
+            let upstream_session = quic
+                .client
+                .connect(upstream_url)
+                .await
+                .context("failed to connect to upstream relay")?;
+
+            let (session, publisher, subscriber) =
+                moq_transport::session::Session::connect(upstream_session)
+                    .await
+                    .context("failed to establish upstream MoQ session")?;
+
+            log::info!("Connected to upstream relay: {}", upstream_url);
+
+            // Create session for the upstream connection
+            let upstream = Session {
+                session,
+                producer: Some(Producer::new(publisher, locals.clone(), None)),
+                consumer: Some(Consumer::new(subscriber, locals.clone(), None, None)),
+            };
+
+            let forward = upstream.producer.clone();
+
+            // Spawn the upstream session handler
+            tokio::spawn(async move {
+                if let Err(err) = upstream.run().await {
+                    log::error!("Upstream session failed: {}", err);
+                }
+            });
+
+            (forward, None) // No remotes API, just forwarding
+        } else {
+            log::warn!("No --upstream specified, running in isolated mode (no stream forwarding)");
+            (None, None)
+        };
 
         let ws_server = WebSocketServer::new(WebSocketConfig {
             bind: ws_bind,
             tls: tls.clone(),
             no_tls: cli.ws_no_tls,
             locals,
-            remotes: None, // No remote fetching in ws-only mode
-            api: None,     // No cluster API in ws-only mode
-            forward: None, // No announce forwarding in ws-only mode
+            remotes,
+            api: None,
+            forward,
             quic_addr: ws_bind, // Dummy address
         });
 
