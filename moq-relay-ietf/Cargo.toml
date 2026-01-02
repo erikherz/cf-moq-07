@@ -16,6 +16,11 @@ moq-transport = { path = "../moq-transport", version = "0.10" }
 moq-native-ietf = { path = "../moq-native-ietf", version = "0.5" }
 moq-api = { path = "../moq-api", version = "0.2" }
 
+# WebSocket polyfill for Safari support
+web-transport-ws = { git = "https://github.com/moq-dev/web-transport", branch = "main" }
+web-transport = { workspace = true }
+tokio-tungstenite = "0.24"
+
 # QUIC
 url = "2"
 
@@ -23,13 +28,16 @@ url = "2"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 
-# Web server to serve the fingerprint
-axum = { version = "0.7", features = ["tokio"] }
-hyper-serve = { version = "0.6", features = [
-	"tls-rustls",
-] } # fork of axum-server
+# Web server to serve the fingerprint and WebSocket connections
+axum = { version = "0.7", features = ["tokio", "ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
 hex = "0.4"
+
+# TLS and HTTP for WebSocket server
+tokio-rustls = "0.26"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower-service = "0.3"
 
 # Error handling
 anyhow = { version = "1", features = ["backtrace"] }

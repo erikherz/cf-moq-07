@@ -7,9 +7,10 @@ use moq_native_ietf::quic;
 use url::Url;
 
 use crate::{Api, Consumer, Locals, Producer, Remotes, RemotesConsumer, RemotesProducer, Session};
+use crate::{WebSocketConfig, WebSocketServer};
 
 pub struct RelayConfig {
-    /// Listen on this address
+    /// Listen on this address for QUIC/WebTransport connections
     pub bind: net::SocketAddr,
 
     /// The TLS configuration.
@@ -24,6 +25,9 @@ pub struct RelayConfig {
     /// Our hostname which we advertise to other origins.
     /// We use QUIC, so the certificate must be valid for this address.
     pub node: Option<Url>,
+
+    /// Optional address to bind the WebSocket server for Safari support.
+    pub ws_bind: Option<net::SocketAddr>,
 }
 
 pub struct Relay {
@@ -32,6 +36,10 @@ pub struct Relay {
     locals: Locals,
     api: Option<Api>,
     remotes: Option<(RemotesProducer, RemotesConsumer)>,
+    /// WebSocket bind address (for Safari support)
+    ws_bind: Option<net::SocketAddr>,
+    /// TLS config (needed for WebSocket server)
+    tls: moq_native_ietf::tls::Config,
 }
 
 impl Relay {
@@ -39,7 +47,7 @@ impl Relay {
     pub fn new(config: RelayConfig) -> anyhow::Result<Self> {
         let quic = quic::Endpoint::new(quic::Config {
             bind: config.bind,
-            tls: config.tls,
+            tls: config.tls.clone(),
         })?;
 
         let api = if let (Some(url), Some(node)) = (config.api, config.node) {
@@ -65,6 +73,8 @@ impl Relay {
             api,
             locals,
             remotes,
+            ws_bind: config.ws_bind,
+            tls: config.tls,
         })
     }
 
@@ -110,7 +120,25 @@ impl Relay {
         };
 
         let mut server = self.quic.server.context("missing TLS certificate")?;
-        log::info!("listening on {}", server.local_addr()?);
+        let quic_addr = server.local_addr()?;
+        log::info!("QUIC server listening on {}", quic_addr);
+
+        // Start WebSocket server for Safari support if configured
+        if let Some(ws_bind) = self.ws_bind {
+            let ws_server = WebSocketServer::new(WebSocketConfig {
+                bind: ws_bind,
+                tls: self.tls.clone(),
+                locals: self.locals.clone(),
+                remotes: remotes.clone(),
+                api: self.api.clone(),
+                forward: forward.clone(),
+                quic_addr,
+            });
+
+            tasks.push(async move {
+                ws_server.run().await.context("WebSocket server failed")
+            }.boxed());
+        }
 
         loop {
             tokio::select! {

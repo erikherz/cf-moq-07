@@ -9,6 +9,7 @@ members = [
 	"moq-dir",
 	"moq-native-ietf",
 	"moq-catalog",
+	"web-transport-bridge",
 ]
 resolver = "2"
 
@@ -16,6 +17,10 @@ resolver = "2"
 web-transport = "0.3"
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
+
+# Patch web-transport to use our bridge with WebSocket support
+[patch.crates-io]
+web-transport = { path = "web-transport-bridge" }
 
 # Use debug symbols in production until things are more stable
 [profile.release]

@@ -1,0 +1,18 @@
+[package]
+name = "web-transport"
+version = "0.3.1"
+edition = "2021"
+description = "WebTransport bridge with WebSocket support for Safari"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# For QUIC/WebTransport (existing functionality)
+web-transport-quinn = "0.3"
+
+# For WebSocket support (Safari)
+web-transport-ws = { git = "https://github.com/moq-dev/web-transport", branch = "main" }
+web-transport-trait = { git = "https://github.com/moq-dev/web-transport", branch = "main" }
+
+# Common dependencies
+bytes = "1"
+thiserror = "1"

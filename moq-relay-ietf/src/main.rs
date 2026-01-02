@@ -8,6 +8,7 @@ mod relay;
 mod remote;
 mod session;
 mod web;
+mod websocket;
 
 pub use api::*;
 pub use consumer::*;
@@ -17,13 +18,14 @@ pub use relay::*;
 pub use remote::*;
 pub use session::*;
 pub use web::*;
+pub use websocket::*;
 
 use std::net;
 use url::Url;
 
 #[derive(Parser, Clone)]
 pub struct Cli {
-    /// Listen on this address
+    /// Listen on this address for QUIC/WebTransport connections
     #[arg(long, default_value = "[::]:443")]
     pub bind: net::SocketAddr,
 
@@ -50,6 +52,11 @@ pub struct Cli {
     /// This hosts a HTTPS web server via TCP to serve the fingerprint of the certificate.
     #[arg(long)]
     pub dev: bool,
+
+    /// Listen on this address for WebSocket connections (Safari support).
+    /// When provided, starts a WSS server for browsers without WebTransport support.
+    #[arg(long)]
+    pub ws_bind: Option<net::SocketAddr>,
 }
 
 #[tokio::main]
@@ -76,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         node: cli.node,
         api: cli.api,
         announce: cli.announce,
+        ws_bind: cli.ws_bind,
     })?;
 
     if cli.dev {
