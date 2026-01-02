@@ -62,6 +62,11 @@ pub struct Cli {
     /// WARNING: Only use this when the WebSocket server is behind a trusted proxy that handles TLS.
     #[arg(long, default_value = "false")]
     pub ws_no_tls: bool,
+
+    /// Run in WebSocket-only mode without the QUIC server.
+    /// Use this for environments that don't support UDP (like Cloudflare Containers).
+    #[arg(long, default_value = "false")]
+    pub ws_only: bool,
 }
 
 #[tokio::main]
@@ -81,7 +86,35 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("missing TLS certificates");
     }
 
-    // Create a QUIC server for media.
+    // WebSocket-only mode for environments without UDP support (like Cloudflare Containers)
+    if cli.ws_only {
+        let ws_bind = cli.ws_bind.ok_or_else(|| {
+            anyhow::anyhow!("--ws-bind is required when using --ws-only mode")
+        })?;
+
+        log::info!("Running in WebSocket-only mode (no QUIC)");
+
+        let locals = Locals::new();
+
+        // Set up upstream connection for forwarding announces (via HTTPS, not QUIC)
+        // Note: In ws-only mode, we can't forward to QUIC relays directly
+        // The container will just be a local relay without upstream forwarding
+
+        let ws_server = WebSocketServer::new(WebSocketConfig {
+            bind: ws_bind,
+            tls: tls.clone(),
+            no_tls: cli.ws_no_tls,
+            locals,
+            remotes: None, // No remote fetching in ws-only mode
+            api: None,     // No cluster API in ws-only mode
+            forward: None, // No announce forwarding in ws-only mode
+            quic_addr: ws_bind, // Dummy address
+        });
+
+        return ws_server.run().await;
+    }
+
+    // Normal mode with QUIC server
     let relay = Relay::new(RelayConfig {
         tls: tls.clone(),
         bind: cli.bind,
