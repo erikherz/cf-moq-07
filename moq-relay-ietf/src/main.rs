@@ -1,5 +1,59 @@
 use anyhow::Context;
 use clap::Parser;
+use tokio_rustls::rustls;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::DigitallySignedStruct;
+
+/// A certificate verifier that accepts any certificate (for when we don't need TLS verification)
+#[derive(Debug)]
+struct NoVerifier;
+
+impl ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
 
 mod api;
 mod consumer;
@@ -123,7 +177,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(tracer).unwrap();
 
     let cli = Cli::parse();
-    let tls = cli.tls.load()?;
 
     // WebSocket-only mode for environments without UDP support (like Cloudflare Containers)
     if cli.ws_only {
@@ -131,12 +184,28 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!("--ws-bind is required when using --ws-only mode")
         })?;
 
-        // In ws-only mode with no TLS, we don't need certificates
-        if !cli.ws_no_tls && tls.server.is_none() {
-            anyhow::bail!("TLS certificates required unless --ws-no-tls is specified");
-        }
-
         log::info!("Running in WebSocket-only mode (no QUIC server)");
+
+        // Only load TLS if we need it (for HTTPS websocket or upstream connection)
+        let tls = if cli.ws_no_tls && cli.upstream.is_none() {
+            // No TLS needed at all - create a minimal dummy config
+            log::info!("No TLS required (--ws-no-tls without upstream)");
+            moq_native_ietf::tls::Config {
+                client: rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifier))
+                    .with_no_client_auth(),
+                server: None,
+                fingerprints: vec![],
+            }
+        } else {
+            // Load TLS config normally
+            let tls = cli.tls.load()?;
+            if !cli.ws_no_tls && tls.server.is_none() {
+                anyhow::bail!("TLS certificates required unless --ws-no-tls is specified");
+            }
+            tls
+        };
 
         let locals = Locals::new();
 
@@ -180,6 +249,8 @@ async fn main() -> anyhow::Result<()> {
 
         return ws_server.run().await;
     }
+
+    let tls = cli.tls.load()?;
 
     // Normal mode requires TLS certificates for QUIC
     if tls.server.is_none() {
