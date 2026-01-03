@@ -58,7 +58,7 @@ async fn connect_upstream(
     };
 
     // Run the upstream session (blocks until it ends)
-    upstream.run().await
+    upstream.run().await.map_err(|e| anyhow::anyhow!("upstream session error: {}", e))
 }
 
 #[derive(Parser, Clone)]
